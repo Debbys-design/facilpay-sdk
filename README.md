@@ -484,3 +484,8 @@ Contributions are welcome.
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+## Handsoff notes
+
+<!-- handsoff-issue-19 -->
+- #19: Settlements, rates, currencies and merchant fee resources
