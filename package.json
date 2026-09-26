@@ -1,0 +1,26 @@
+{
+  "name": "facilpay-sdk",
+  "version": "0.1.0",
+  "description": "Official SDK for the FacilPay API",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "generate:types": "openapi-typescript https://api.facilpay.com/docs-json -o src/types/generated.ts",
+    "generate:types:local": "openapi-typescript ./openapi.json -o src/types/generated.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "facilpay",
+    "sdk",
+    "payments"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "openapi-typescript": "^6.7.6",
+    "typescript": "^5.4.5"
+  }
+}

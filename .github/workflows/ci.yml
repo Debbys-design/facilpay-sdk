@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+
+  generate-types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Regenerate API types from OpenAPI spec
+        run: npm run generate:types
+      - name: Fail if committed types are out of date
+        run: |
+          if ! git diff --exit-code -- src/types/generated.ts; then
+            echo "::error::src/types/generated.ts is out of date. Run 'npm run generate:types' and commit the result."
+            exit 1
+          fi
