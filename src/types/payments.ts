@@ -31,9 +31,39 @@ export interface ListPaymentsParams {
   to?: string;
 }
 
+/**
+ * Parameters accepted by `POST /v1/payments/:id/refund`.
+ *
+ * Omitting `amount` refunds the full remaining balance and moves the payment
+ * to `REFUNDED`. Passing an `amount` issues a partial refund and moves the
+ * payment to `PARTIALLY_REFUNDED`. When provided, `amount` must be greater
+ * than `0`.
+ */
 export interface RefundPaymentParams {
   amount?: number;
   reason?: string;
+}
+
+/**
+ * Alias for {@link RefundPaymentParams}, mirroring the API's
+ * `RefundPaymentDto`.
+ */
+export type RefundPaymentDto = RefundPaymentParams;
+
+/**
+ * A refund issued against a payment.
+ *
+ * Returned by `payments.refund()`. A successful refund also emits the
+ * `refund.issued` webhook.
+ */
+export interface Refund {
+  id: string;
+  paymentId: string;
+  amount: number;
+  currency: string;
+  status: string;
+  reason?: string;
+  createdAt: string;
 }
 
 /**
