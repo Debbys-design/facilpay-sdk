@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FacilPayAPIError } from './errors';
+import { FacilPayAPIError, FacilPayConnectionError } from './errors';
 import { HttpClient } from './http';
 import { FacilPayValidationError } from './errors';
 
@@ -74,6 +74,32 @@ describe('HttpClient diagnostics', () => {
     );
   });
 
+  it('redacts apiKey and webhook secret fields in logged request bodies', async () => {
+    const logger = { debug: vi.fn() };
+    const http = new HttpClient({ logger, fetch: createFetch() });
+
+    await http.request({
+      method: 'POST',
+      path: '/webhooks',
+      body: {
+        apiKey: 'api-key-value',
+        webhookSecret: 'whsec_secret-value',
+        token: 'fp_live_token-value',
+        sandboxToken: 'fp_test_sandbox-value',
+      },
+    });
+
+    const logged = JSON.stringify(logger.debug.mock.calls[0]?.[0]);
+    for (const sensitiveValue of [
+      'api-key-value',
+      'whsec_secret-value',
+      'fp_live_token-value',
+      'fp_test_sandbox-value',
+    ]) {
+      expect(logged).not.toContain(sensitiveValue);
+    }
+  });
+
   it('sends a per-request correlation ID and logs the response request ID', async () => {
     const fetch = createFetch({}, { 'x-request-id': 'req_123' });
     const logger = { debug: vi.fn() };
@@ -132,6 +158,69 @@ describe('HttpClient diagnostics', () => {
     await http.request({ path: '/payments' });
 
     expect(debug).toHaveBeenCalledWith(expect.objectContaining({ path: '/payments' }));
+  });
+});
+
+describe('HttpClient timeouts and aborts', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('throws FacilPayConnectionError when the request times out', async () => {
+    const fetch = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'));
+          });
+        }),
+    ) as unknown as typeof fetch;
+    const http = new HttpClient({ fetch, timeoutMs: 5, maxRetries: 0 });
+
+    await expect(http.request({ path: '/payments' })).rejects.toBeInstanceOf(
+      FacilPayConnectionError,
+    );
+  });
+
+  it('does not retry when the caller aborts the request', async () => {
+    const controller = new AbortController();
+    const fetch = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'));
+          });
+        }),
+    ) as unknown as typeof fetch;
+    const http = new HttpClient({ fetch, maxRetries: 3 });
+
+    const promise = http.request({ path: '/payments', signal: controller.signal });
+    controller.abort();
+
+    await expect(promise).rejects.toBeInstanceOf(FacilPayConnectionError);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops retrying when the caller aborts during retry backoff', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const fetch = vi.fn(async () => {
+      throw new TypeError('network down');
+    }) as unknown as typeof fetch;
+    const http = new HttpClient({ fetch, maxRetries: 3, retryDelayMs: 1000 });
+
+    const promise = http.request({ path: '/payments', signal: controller.signal });
+    const assertion = expect(promise).rejects.toBeInstanceOf(FacilPayConnectionError);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    await assertion;
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
 
