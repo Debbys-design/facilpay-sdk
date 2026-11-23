@@ -1,0 +1,30 @@
+name: Documentation
+about: Report an issue or improvement with the documentation
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the docs! Please describe the issue below.
+  - type: input
+    id: location
+    attributes:
+      label: Location
+      description: Link or path to the documentation that needs attention.
+      placeholder: e.g. README.md or https://...
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What is wrong or missing, and what would you like to see?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add any other context about the documentation issue.
+    validations:
+      required: false
