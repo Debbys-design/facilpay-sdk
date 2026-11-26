@@ -38,6 +38,20 @@ export type {
 export { Webhooks, constructEvent, generateTestHeader, verifySignature } from './webhooks/verify';
 export type { ConstructEventOptions, WebhookPayload } from './webhooks/verify';
 export { isEventType } from './webhooks/events';
+
+// Framework webhook handler factory (Express, Next.js App Router, Hono, Workers, …).
+export { createWebhookHandler } from './webhooks/handler';
+export type {
+  WebhookEventHandler,
+  WebhookEventMap,
+  WebhookHandlerMap,
+  WebhookHandlerOptions,
+  FetchWebhookHandler,
+  ExpressWebhookHandler,
+  ExpressRequest,
+  ExpressResponse,
+  NextFunction,
+} from './webhooks/handler';
 export type {
   DisputeOpenedEvent,
   FacilPayEvent,

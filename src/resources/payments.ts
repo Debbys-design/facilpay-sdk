@@ -251,124 +251,67 @@ export class Payments {
   /**
    * Refund a payment, in full or in part.
    *
-   * Omitting `amount` refunds the full remaining balance and moves the payment to
-   * `REFUNDED`. Passing an `amount` issues a partial refund and moves the payment
-   * to `PARTIALLY_REFUNDED`. A successful refund emits the `refund.issued` webhook.
-   *
    * `POST /v1/payments/:id/refund`
    *
-   * @param paymentId - Id of the payment to refund.
-   * @param params - Optional partial `amount` and `reason`.
+   * @param id - Payment id.
+   * @param params - Optional refund amount and reason.
    * @param options - Per-request options; set `testMode: true` to send `x-test-mode: true`.
-   * @returns The issued refund.
-   * @throws {FacilPayValidationError} When `amount` is provided but not greater than 0 (no request is sent).
-   * @throws {FacilPayAPIError} When the payment is already refunded (`409`) or the API rejects the amount (`422`).
+   * @returns The created refund.
+   * @throws {FacilPayValidationError} When the refund amount is not greater than 0 (no request is sent).
+   * @throws {FacilPayAPIError} When the payment does not exist (`404`) or the refund is rejected (`409`).
    * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
    *
    * @example
    * ```ts
-   * // Full refund
-   * const refund = await facilpay.payments.refund('pay_123');
-   *
-   * // Partial refund
-   * const partial = await facilpay.payments.refund('pay_123', { amount: 5, reason: 'Damaged item' });
+   * const refund = await facilpay.payments.refund('pay_123', { amount: 5 });
    * ```
    */
   refund(
-    paymentId: string,
+    id: string,
     params?: RefundPaymentDto,
     options?: PaymentsRequestOptions,
   ): Promise<Refund> {
-    validateRefundPaymentParams(params);
+    if (params?.amount !== undefined && params.amount <= 0) {
+      throw new FacilPayValidationError('Refund amount must be greater than 0');
+    }
     return this.http.post<Refund>(
-      `/v1/payments/${encodeURIComponent(paymentId)}/refund`,
+      `/v1/payments/${encodeURIComponent(id)}/refund`,
       params ?? {},
       withTestMode(options),
     );
   }
 
   /**
-   * Create several payments in a single request.
-   *
-   * Partial failures are surfaced through the returned `failures` array instead of
-   * throwing for the whole batch, so callers can inspect each item individually.
-   *
-   * Note: bulk creation does **not** support idempotency keys.
-   *
-   * `POST /v1/payments/bulk`
-   *
-   * @param items - Payments to create; each is validated like {@link Payments.create}.
-   * @param options - Per-request options; set `testMode: true` to send `x-test-mode: true`.
-   * @returns The per-item `successes` and `failures`.
-   * @throws {FacilPayValidationError} When `items` is empty or any item fails client-side validation.
-   * @throws {FacilPayAPIError} When the API rejects the whole batch.
-   * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
-   *
-   * @example
-   * ```ts
-   * const result = await facilpay.payments.createBulk([
-   *   { amount: 10.5, currency: 'EUR' },
-   *   { amount: 20, currency: 'EUR' },
-   * ]);
-   * console.log(result.successes.length, result.failures.length);
-   * ```
-   */
-  createBulk(
-    items: CreatePaymentParams[],
-    options?: PaymentsRequestOptions,
-  ): Promise<BulkCreatePaymentsResponseDto> {
-    if (!Array.isArray(items) || items.length === 0) {
-      throw new FacilPayValidationError('`items` must be a non-empty array of payments.');
-    }
-    for (const item of items) {
-      validateCreatePaymentParams(item);
-    }
-    return this.http.post<BulkCreatePaymentsResponseDto>(
-      '/v1/payments/bulk',
-      { items },
-      withTestMode(options),
-    );
-  }
-
-  /**
-   * Export payments as CSV text.
+   * Export payments as a CSV document.
    *
    * `GET /v1/payments/export`
    *
    * @param params - Optional status, date range and merchant filters.
    * @param options - Per-request options; set `testMode: true` to send `x-test-mode: true`.
-   * @returns The CSV export as a string.
+   * @returns The raw CSV payload.
    * @throws {FacilPayAPIError} When the API rejects the request.
    * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
-   *
-   * @example
-   * ```ts
-   * const csv = await facilpay.payments.export({ status: 'succeeded' });
-   * ```
    */
-  export(params?: ExportPaymentsParams, options?: PaymentsRequestOptions): Promise<string> {
-    return this.http.get<string>('/v1/payments/export', {
-      ...withTestMode(options),
-      params,
-      responseType: 'text',
-    });
+  export(
+    params?: ExportPaymentsParams,
+    options?: PaymentsRequestOptions,
+  ): Promise<string> {
+    return this.http.get<string>(
+      '/v1/payments/export',
+      params ? { ...withTestMode(options), params: { ...params } } : withTestMode(options),
+    );
   }
 
   /**
-   * Retrieve the timeline of events for a payment.
+   * Retrieve the timeline of a payment.
    *
    * `GET /v1/payments/:id/timeline`
    *
    * @param id - Payment id.
    * @param options - Per-request options; set `testMode: true` to send `x-test-mode: true`.
-   * @returns The ordered timeline entries of the payment.
+   * @returns The payment timeline.
    * @throws {FacilPayAPIError} When the payment does not exist (`404`) or the API rejects the request.
    * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
-   *
-   * @example
-   * ```ts
-   * const timeline = await facilpay.payments.timeline('pay_123');
-   * ```
    */
   timeline(id: string, options?: PaymentsRequestOptions): Promise<PaymentTimeline> {
     return this.http.get<PaymentTimeline>(
@@ -378,159 +321,94 @@ export class Payments {
   }
 
   /**
-   * Retrieve the invoice attached to a payment.
+   * Generate an invoice for a payment.
    *
-   * `GET /v1/payments/:id/invoice`
+   * `POST /v1/payments/:id/invoice`
    *
    * @param id - Payment id.
    * @param options - Per-request options; set `testMode: true` to send `x-test-mode: true`.
-   * @returns The payment invoice.
+   * @returns The generated invoice.
    * @throws {FacilPayAPIError} When the payment does not exist (`404`) or the API rejects the request.
    * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
-   *
-   * @example
-   * ```ts
-   * const invoice = await facilpay.payments.invoice('pay_123');
-   * ```
    */
   invoice(id: string, options?: PaymentsRequestOptions): Promise<PaymentInvoice> {
-    return this.http.get<PaymentInvoice>(
+    return this.http.post<PaymentInvoice>(
       `/v1/payments/${encodeURIComponent(id)}/invoice`,
+      {},
       withTestMode(options),
     );
   }
 
   /**
-   * Retrieve a public invoice by its shareable token.
+   * Retrieve a public invoice by token.
    *
-   * This endpoint does **not** require authentication, so it can be called from
-   * unauthenticated contexts (e.g. a customer facing checkout page).
+   * `GET /v1/payments/invoices/:token`
    *
-   * `GET /v1/payments/invoice/:token`
-   *
-   * @param token - Shareable invoice token.
+   * @param token - Public invoice token.
    * @param options - Per-request options; set `testMode: true` to send `x-test-mode: true`.
    * @returns The invoice.
-   * @throws {FacilPayAPIError} When the token is unknown (`404`) or the API rejects the request.
+   * @throws {FacilPayAPIError} When the invoice does not exist (`404`) or the API rejects the request.
    * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
-   *
-   * @example
-   * ```ts
-   * const invoice = await facilpay.payments.publicInvoice('inv_tok_123');
-   * ```
    */
   publicInvoice(token: string, options?: PaymentsRequestOptions): Promise<PaymentInvoice> {
     return this.http.get<PaymentInvoice>(
-      `/v1/payments/invoice/${encodeURIComponent(token)}`,
+      `/v1/payments/invoices/${encodeURIComponent(token)}`,
       withTestMode(options),
     );
   }
 
   /**
-   * Retrieve the QR code for a payment.
+   * Create multiple payments in a single request.
    *
-   * Returns a data URL when the API responds with a textual content type, or the
-   * raw bytes when the API responds with a binary content type.
+   * `POST /v1/payments/bulk`
    *
-   * `GET /v1/payments/:id/qr`
+   * @param payments - Payments to create.
+   * @param options - Per-request options; set `testMode: true` to send `x-test-mode: true`.
+   * @returns The per-item results of the bulk request.
+   * @throws {FacilPayValidationError} When any item fails client-side validation (no request is sent).
+   * @throws {FacilPayAPIError} When the API rejects the request.
+   * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
+   */
+  createBulk(
+    payments: CreatePaymentParams[],
+    options?: PaymentsRequestOptions,
+  ): Promise<BulkCreatePaymentsResponseDto> {
+    for (const params of payments) {
+      validateCreatePaymentParams(params);
+    }
+    return this.http.post<BulkCreatePaymentsResponseDto>(
+      '/v1/payments/bulk',
+      { payments },
+      withTestMode(options),
+    );
+  }
+
+  /**
+   * Retrieve the QR code of a payment.
+   *
+   * `GET /v1/payments/:id/qr-code`
    *
    * @param id - Payment id.
-   * @param params - Optional image `format` (`png` or `svg`).
    * @param options - Per-request options; set `testMode: true` to send `x-test-mode: true`.
-   * @returns The QR code as a data URL or raw bytes.
+   * @returns The QR code image as a binary payload.
    * @throws {FacilPayAPIError} When the payment does not exist (`404`) or the API rejects the request.
    * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
-   *
-   * @example
-   * ```ts
-   * const qr = await facilpay.payments.getQrCode('pay_123', { format: 'png' });
-   * ```
    */
   getQrCode(
     id: string,
-    params?: GetQrCodeOptions,
+    qrOptions?: GetQrCodeOptions,
     options?: PaymentsRequestOptions,
-  ): Promise<string | Uint8Array> {
-    return this.http.get<string | Uint8Array>(`/v1/payments/${encodeURIComponent(id)}/qr`, {
-      ...withTestMode(options),
-      params,
-      responseType: 'arraybuffer',
-    });
-  }
-
-  /**
-   * Retrieve a single payment by id.
-   *
-   * `GET /v1/payments/:id`
-   *
-   * @param id - Payment id.
-   * @param options - Per-request options; set `testMode: true` to send `x-test-mode: true`.
-   * @returns The payment.
-   * @throws {FacilPayAPIError} When the payment does not exist (`404`) or the API rejects the request.
-   * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
-   *
-   * @example
-   * ```ts
-   * const payment = await facilpay.payments.retrieve('pay_123');
-   * ```
-   */
-  retrieve(id: string, options?: PaymentsRequestOptions): Promise<Payment> {
-    return this.http.get<Payment>(`/v1/payments/${encodeURIComponent(id)}`, withTestMode(options));
-  }
-
-  /**
-   * List payments, optionally filtered.
-   *
-   * Returns a page that is also an `AsyncIterable`: `await` it for the first
-   * page, or use `for await` to iterate every payment across all pages.
-   *
-   * `GET /v1/payments`
-   *
-   * @param params - Optional status, date range, paging and sorting filters.
-   * @param options - Per-request options; set `testMode: true` to send `x-test-mode: true`.
-   * @returns A page of payments that can be iterated across all pages.
-   * @throws {FacilPayAPIError} When the API rejects the request.
-   * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
-   *
-   * @example
-   * ```ts
-   * for await (const payment of facilpay.payments.list({ status: 'succeeded' })) {
-   *   console.log(payment.id);
-   * }
-   * ```
-   */
-  list(params?: ListPaymentsParams, options?: PaymentsRequestOptions): PagePromise<Payment> {
-    return this.http.getPage<Payment>('/v1/payments', params, withTestMode(options));
-  }
-
-  /**
-   * Cancel a payment that has not settled yet.
-   *
-   * `POST /v1/payments/:id/cancel`
-   *
-   * @param id - Payment id.
-   * @param options - Per-request options; set `testMode: true` to send `x-test-mode: true`.
-   * @returns The cancelled payment.
-   * @throws {FacilPayAPIError} When the payment does not exist (`404`) or can no longer be cancelled (`409`).
-   * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
-   *
-   * @example
-   * ```ts
-   * const payment = await facilpay.payments.cancel('pay_123');
-   * ```
-   */
-  cancel(id: string, options?: PaymentsRequestOptions): Promise<Payment> {
-    return this.http.post<Payment>(
-      `/v1/payments/${encodeURIComponent(id)}/cancel`,
-      undefined,
-      withTestMode(options),
+  ): Promise<ArrayBuffer> {
+    return this.http.get<ArrayBuffer>(
+      `/v1/payments/${encodeURIComponent(id)}/qr-code`,
+      qrOptions ? { ...withTestMode(options), params: { ...qrOptions } } : withTestMode(options),
     );
   }
 }
 
-function withTestMode(options?: PaymentsRequestOptions): RequestOptions | undefined {
+function withTestMode(options?: PaymentsRequestOptions): RequestOptions {
   if (!options?.testMode) {
-    return options;
+    return options ?? {};
   }
   return {
     ...options,
@@ -540,42 +418,29 @@ function withTestMode(options?: PaymentsRequestOptions): RequestOptions | undefi
 
 function validateCreatePaymentParams(params: CreatePaymentParams): void {
   if (typeof params.amount !== 'number' || Number.isNaN(params.amount) || params.amount < 0.01) {
-    throw new FacilPayValidationError('`amount` must be a number greater than or equal to 0.01.');
+    throw new FacilPayValidationError('amount must be a number >= 0.01');
   }
-
-  if (typeof params.currency !== 'string' || params.currency.length !== CURRENCY_LENGTH) {
-    throw new FacilPayValidationError('`currency` must be a 3 character ISO 4217 code.');
+  if (typeof params.currency !== 'string' || params.currency.length !== 3) {
+    throw new FacilPayValidationError('currency must be a 3-character ISO 4217 code');
   }
-
-  if (params.description !== undefined && params.description.length > MAX_DESCRIPTION_LENGTH) {
-    throw new FacilPayValidationError(
-      `\`description\` must be at most ${MAX_DESCRIPTION_LENGTH} characters.`,
-    );
+  if (params.description !== undefined && params.description.length > 500) {
+    throw new FacilPayValidationError('description must be at most 500 characters');
   }
-
   if (params.metadata !== undefined) {
     const entries = Object.entries(params.metadata);
-    if (entries.length > MAX_METADATA_ENTRIES) {
-      throw new FacilPayValidationError(
-        `\`metadata\` must contain at most ${MAX_METADATA_ENTRIES} entries.`,
-      );
+    if (entries.length > 20) {
+      throw new FacilPayValidationError('metadata must have at most 20 entries');
     }
-    for (const [key, value] of entries) {
-      if (typeof value !== 'string' || value.length > MAX_METADATA_VALUE_LENGTH) {
-        throw new FacilPayValidationError(
-          `\`metadata.${key}\` must be a string of at most ${MAX_METADATA_VALUE_LENGTH} characters.`,
-        );
+    for (const [, value] of entries) {
+      if (typeof value !== 'string' || value.length > 500) {
+        throw new FacilPayValidationError('metadata values must be strings of at most 500 characters');
       }
     }
   }
-
   if (params.splits !== undefined) {
-    if (!Array.isArray(params.splits) || params.splits.length === 0) {
-      throw new FacilPayValidationError('`splits` must be a non-empty array when provided.');
-    }
     const total = params.splits.reduce((sum, split) => sum + split.percentage, 0);
-    if (Math.abs(total - 100) > Number.EPSILON) {
-      throw new FacilPayValidationError('`splits` percentages must sum to 100.');
+    if (Math.abs(total - 100) > 0.001) {
+      throw new FacilPayValidationError('splits percentages must sum to 100');
     }
   }
 }

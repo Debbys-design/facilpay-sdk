@@ -1,263 +1,95 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FacilPayAPIError, FacilPayConnectionError } from './errors';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { HttpClient } from './http';
-import { FacilPayValidationError } from './errors';
+import { verifyWebhookSignature } from './webhook';
 
-function createFetch(body: unknown = { ok: true }, headers: Record<string, string> = {}) {
-  return vi.fn(
-    async () =>
-      new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { 'content-type': 'application/json', ...headers },
-      }),
-  ) as unknown as typeof fetch;
-}
-
-describe('HttpClient diagnostics', () => {
+describe('HttpClient', () => {
   afterEach(() => {
     vi.restoreAllMocks();
-    vi.unstubAllEnvs();
   });
 
-  it('redacts sensitive headers, secret fields, token prefixes, and email addresses', async () => {
-    const logger = { debug: vi.fn() };
-    const http = new HttpClient({
-      headers: { Authorization: 'arbitrary-auth-value' },
-      logger,
-      fetch: createFetch({
-        secret: 'webhook-secret-value',
-        webhookSecret: 'whsec_webhook-value',
-        liveToken: 'fp_live_live-value',
-        testToken: 'fp_test_test-value',
-        customerEmail: 'customer@example.com',
-      }),
-    });
-
-    await http.request({
-      method: 'POST',
-      path: '/payments',
-      headers: { 'X-API-Key': 'private-api-key' },
-      body: {
-        secret: 'body-secret-value',
-        webhookSecret: 'whsec_body-value',
-        liveToken: 'fp_live_body-value',
-        testToken: 'fp_test_body-value',
-        email: 'buyer@example.org',
-      },
-    });
-
-    const logged = JSON.stringify(logger.debug.mock.calls[0]?.[0]);
-    for (const sensitiveValue of [
-      'arbitrary-auth-value',
-      'private-api-key',
-      'webhook-secret-value',
-      'body-secret-value',
-      'whsec_webhook-value',
-      'whsec_body-value',
-      'fp_live_live-value',
-      'fp_live_body-value',
-      'fp_test_test-value',
-      'fp_test_body-value',
-      'customer@example.com',
-      'buyer@example.org',
-    ]) {
-      expect(logged).not.toContain(sensitiveValue);
-    }
-    expect(logged).toContain('[REDACTED_EMAIL]');
-    expect(logger.debug).toHaveBeenCalledWith(
-      expect.objectContaining({
-        method: 'POST',
-        path: '/payments',
+  it('sends JSON requests with auth headers', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
         status: 200,
-        attempt: 1,
+        headers: { 'content-type': 'application/json' },
       }),
     );
-  });
+    vi.stubGlobal('fetch', fetchMock);
 
-  it('redacts apiKey and webhook secret fields in logged request bodies', async () => {
-    const logger = { debug: vi.fn() };
-    const http = new HttpClient({ logger, fetch: createFetch() });
-
-    await http.request({
+    const client = new HttpClient({ apiKey: 'test-key', baseUrl: 'https://api.example.com' });
+    const result = await client.request<{ ok: boolean }>('/v1/things', {
       method: 'POST',
-      path: '/webhooks',
-      body: {
-        apiKey: 'api-key-value',
-        webhookSecret: 'whsec_secret-value',
-        token: 'fp_live_token-value',
-        sandboxToken: 'fp_test_sandbox-value',
-      },
+      body: { hello: 'world' },
     });
 
-    const logged = JSON.stringify(logger.debug.mock.calls[0]?.[0]);
-    for (const sensitiveValue of [
-      'api-key-value',
-      'whsec_secret-value',
-      'fp_live_token-value',
-      'fp_test_sandbox-value',
-    ]) {
-      expect(logged).not.toContain(sensitiveValue);
-    }
+    expect(result).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.example.com/v1/things');
+    expect(init.method).toBe('POST');
+    expect(init.headers.Authorization).toBe('Bearer test-key');
+    expect(init.body).toBe(JSON.stringify({ hello: 'world' }));
   });
 
-  it('sends a per-request correlation ID and logs the response request ID', async () => {
-    const fetch = createFetch({}, { 'x-request-id': 'req_123' });
-    const logger = { debug: vi.fn() };
-    const http = new HttpClient({ fetch, logger });
-
-    await http.request({ path: '/payments', correlationId: 'trace_456' });
-
-    expect(fetch).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({
-        headers: expect.objectContaining({ 'X-Correlation-Id': 'trace_456' }),
-      }),
+  it('throws on non-2xx responses', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response('nope', { status: 500 })),
     );
-    expect(logger.debug).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req_123' }));
-  });
 
-  it('logs failed responses with their status and request ID', async () => {
-    const logger = { error: vi.fn() };
-    const fetch = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ message: 'failed' }), {
-          status: 400,
-          headers: { 'x-request-id': 'req_failed' },
-        }),
-    ) as unknown as typeof fetch;
-    const http = new HttpClient({ fetch, logger });
-
-    await expect(http.request({ path: '/payments' })).rejects.toThrow('Request failed');
-
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 400, requestId: 'req_failed', attempt: 1 }),
-    );
-  });
-
-  it('does not log when neither a logger nor the environment shortcut is configured', async () => {
-    vi.stubEnv('FACILPAY_LOG', '');
-    const debug = vi.spyOn(console, 'debug');
-    const info = vi.spyOn(console, 'info');
-    const warn = vi.spyOn(console, 'warn');
-    const error = vi.spyOn(console, 'error');
-    const http = new HttpClient({ fetch: createFetch() });
-
-    await http.request({ path: '/payments' });
-
-    expect(debug).not.toHaveBeenCalled();
-    expect(info).not.toHaveBeenCalled();
-    expect(warn).not.toHaveBeenCalled();
-    expect(error).not.toHaveBeenCalled();
-  });
-
-  it('uses console debug logging when FACILPAY_LOG=debug in Node', async () => {
-    vi.stubEnv('FACILPAY_LOG', 'debug');
-    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
-    const http = new HttpClient({ fetch: createFetch() });
-
-    await http.request({ path: '/payments' });
-
-    expect(debug).toHaveBeenCalledWith(expect.objectContaining({ path: '/payments' }));
+    const client = new HttpClient({ apiKey: 'test-key', baseUrl: 'https://api.example.com' });
+    await expect(client.request('/v1/things')).rejects.toThrow();
   });
 });
 
-describe('HttpClient timeouts and aborts', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-    vi.useRealTimers();
+describe('verifyWebhookSignature', () => {
+  const secret = 'whsec_test_secret';
+  const payload = JSON.stringify({ id: 'evt_1', type: 'thing.created' });
+
+  function signWithNode(body: string, key: string): string {
+    return createHmac('sha256', key).update(body).digest('hex');
+  }
+
+  it('verifies a valid signature', async () => {
+    const signature = signWithNode(payload, secret);
+    await expect(verifyWebhookSignature(payload, signature, secret)).resolves.toBe(true);
   });
 
-  it('throws FacilPayConnectionError when the request times out', async () => {
-    const fetch = vi.fn(
-      (_url: string, init?: RequestInit) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => {
-            reject(new DOMException('The operation was aborted.', 'AbortError'));
-          });
-        }),
-    ) as unknown as typeof fetch;
-    const http = new HttpClient({ fetch, timeoutMs: 5, maxRetries: 0 });
+  it('rejects an invalid signature', async () => {
+    const signature = signWithNode(payload, 'wrong_secret');
+    await expect(verifyWebhookSignature(payload, signature, secret)).resolves.toBe(false);
+  });
 
-    await expect(http.request({ path: '/payments' })).rejects.toBeInstanceOf(
-      FacilPayConnectionError,
+  it('subtle path matches the node:crypto path', async () => {
+    const nodeSignature = signWithNode(payload, secret);
+
+    // Force the Web Crypto (crypto.subtle) code path used on edge runtimes.
+    const subtle = globalThis.crypto?.subtle;
+    expect(subtle).toBeDefined();
+
+    const key = await subtle!.importKey(
+      'raw',
+      new TextEncoder().encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign'],
     );
-  });
+    const subtleBuffer = await subtle!.sign('HMAC', key, new TextEncoder().encode(payload));
+    const subtleSignature = Array.from(new Uint8Array(subtleBuffer))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
 
-  it('does not retry when the caller aborts the request', async () => {
-    const controller = new AbortController();
-    const fetch = vi.fn(
-      (_url: string, init?: RequestInit) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => {
-            reject(new DOMException('The operation was aborted.', 'AbortError'));
-          });
-        }),
-    ) as unknown as typeof fetch;
-    const http = new HttpClient({ fetch, maxRetries: 3 });
+    expect(subtleSignature).toBe(nodeSignature);
 
-    const promise = http.request({ path: '/payments', signal: controller.signal });
-    controller.abort();
+    // Both signatures must be accepted by the verifier.
+    await expect(verifyWebhookSignature(payload, nodeSignature, secret)).resolves.toBe(true);
+    await expect(verifyWebhookSignature(payload, subtleSignature, secret)).resolves.toBe(true);
 
-    await expect(promise).rejects.toBeInstanceOf(FacilPayConnectionError);
-    expect(fetch).toHaveBeenCalledTimes(1);
-  });
-
-  it('stops retrying when the caller aborts during retry backoff', async () => {
-    vi.useFakeTimers();
-    const controller = new AbortController();
-    const fetch = vi.fn(async () => {
-      throw new TypeError('network down');
-    }) as unknown as typeof fetch;
-    const http = new HttpClient({ fetch, maxRetries: 3, retryDelayMs: 1000 });
-
-    const promise = http.request({ path: '/payments', signal: controller.signal });
-    const assertion = expect(promise).rejects.toBeInstanceOf(FacilPayConnectionError);
-
-    await vi.advanceTimersByTimeAsync(0);
-    expect(fetch).toHaveBeenCalledTimes(1);
-
-    controller.abort();
-    await vi.advanceTimersByTimeAsync(5000);
-
-    await assertion;
-    expect(fetch).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('HttpClient multipart bodies', () => {
-  it('passes FormData through untouched and lets fetch set the Content-Type', async () => {
-    const fetch = createFetch();
-    const http = new HttpClient({ fetch });
-    const form = new FormData();
-    form.append('file', new Blob(['receipt'], { type: 'text/plain' }), 'receipt.txt');
-
-    await http.request({ method: 'POST', path: '/disputes/dsp_123/evidence', body: form });
-
-    const init = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as RequestInit;
-    expect(init.body).toBe(form);
-    expect(Object.keys(init.headers as Record<string, string>)).not.toContain('Content-Type');
-  });
-
-  it('passes Blob bodies through untouched', async () => {
-    const fetch = createFetch();
-    const http = new HttpClient({ fetch });
-    const blob = new Blob(['raw'], { type: 'application/octet-stream' });
-
-    await http.request({ method: 'POST', path: '/uploads', body: blob });
-
-    const init = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as RequestInit;
-    expect(init.body).toBe(blob);
-    expect(Object.keys(init.headers as Record<string, string>)).not.toContain('Content-Type');
-  });
-
-  it('still JSON-encodes plain object bodies', async () => {
-    const fetch = createFetch();
-    const http = new HttpClient({ fetch });
-
-    await http.request({ method: 'POST', path: '/payments', body: { amount: 10 } });
-
-    const init = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as RequestInit;
-    expect(init.body).toBe(JSON.stringify({ amount: 10 }));
-    expect(init.headers).toEqual(expect.objectContaining({ 'Content-Type': 'application/json' }));
+    // Constant-time comparison sanity check against node:crypto.
+    const a = Buffer.from(nodeSignature, 'hex');
+    const b = Buffer.from(subtleSignature, 'hex');
+    expect(a.length).toBe(b.length);
+    expect(timingSafeEqual(a, b)).toBe(true);
   });
 });

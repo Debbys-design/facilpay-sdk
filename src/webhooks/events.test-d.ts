@@ -41,3 +41,8 @@ expectTypeOf<WebhookEventType>().toEqualTypeOf<
   | 'transaction.multisig_completed'
   | 'test'
 >();
+
+// Deprecated legacy names remain assignable to the catalog.
+expectTypeOf<'payment.succeeded'>().toMatchTypeOf<WebhookEventType>();
+expectTypeOf<'payment.refunded'>().toMatchTypeOf<WebhookEventType>();
+expectTypeOf<'dispute.created'>().toMatchTypeOf<WebhookEventType>();

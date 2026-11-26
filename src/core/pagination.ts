@@ -71,7 +71,8 @@ function createPagePromise<T>(fetchPage: PageFetcher<T>, page: number): PageProm
       for (const item of current.data) {
         yield item;
       }
-      current = current.nextPage() ? await current.nextPage()! : null;
+      const next = current.nextPage();
+      current = next ? await next : null;
     }
   };
 
@@ -109,4 +110,23 @@ export interface PagePromise<T> extends Promise<Page<T>>, AsyncIterable<T> {
  */
 export function paginate<T>(fetchPage: PageFetcher<T>): PagePromise<T> {
   return createPagePromise(fetchPage, 1);
+}
+
+/**
+ * Query parameters that can be forwarded to a page-based list endpoint.
+ * Values are serialized as query string entries; `undefined` entries are
+ * skipped so callers can pass optional filters directly.
+ */
+export type PageQuery = Record<string, string | number | boolean | undefined>;
+
+/**
+ * Creates a `PagePromise<T>` from a page fetcher that also accepts query
+ * parameters. The same query is forwarded to every subsequent page so that
+ * filters (status, event type, `since`, ...) stay consistent across pages.
+ */
+export function paginateQuery<T>(
+  fetchPage: (page: number, query: PageQuery) => Promise<PageEnvelope<T>>,
+  query: PageQuery = {},
+): PagePromise<T> {
+  return createPagePromise((page) => fetchPage(page, query), 1);
 }

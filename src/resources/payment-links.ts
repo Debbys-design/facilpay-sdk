@@ -1,4 +1,5 @@
 import type { HttpClient } from '../client';
+import { PagePromise } from '../pagination';
 
 export type PaymentLinkSortBy = 'createdAt' | 'amount' | 'views' | 'completions' | 'updatedAt';
 
@@ -99,25 +100,32 @@ export class PaymentLinksResource {
   }
 
   /**
-   * List payment links, with optional paging and sorting.
+   * List payment links, with optional paging and sorting. Returns an auto-paginating
+   * `PagePromise<PaymentLink>` that supports `for await` and `.toArray()`.
    *
    * `GET /v1/payment-links`
    *
    * @param params - Optional `page`, `limit`, `sortBy` and `sortOrder`.
-   * @returns A page of payment links with paging totals.
+   * @returns A `PagePromise` of payment links.
    * @throws {FacilPayAPIError} When the API rejects the request.
    * @throws {FacilPayConnectionError} When the API cannot be reached or the request times out.
    *
    * @example
    * ```ts
-   * const { data, total } = await facilpay.paymentLinks.list({ sortBy: 'createdAt', sortOrder: 'desc' });
+   * for await (const link of facilpay.paymentLinks.list({ sortBy: 'createdAt', sortOrder: 'desc' })) {
+   *   console.log(link.id);
+   * }
+   *
+   * const all = await facilpay.paymentLinks.list().toArray();
    * ```
    */
-  list(params: ListPaymentLinksParams = {}): Promise<ListPaymentLinksResponse> {
-    return this.http.get<ListPaymentLinksResponse>('/v1/payment-links', {
-      query: params,
-      ...options,
-    });
+  list(params: ListPaymentLinksParams = {}): PagePromise<PaymentLink> {
+    return new PagePromise<PaymentLink>((page) =>
+      this.http.get<ListPaymentLinksResponse>('/v1/payment-links', {
+        query: { ...params, page },
+        ...options,
+      }),
+    );
   }
 
   /**
@@ -264,10 +272,10 @@ export class PaymentLinksResource {
    *
    * @example
    * ```ts
-   * const url = facilpay.paymentLinks.checkoutUrl('plk_tok_123');
+   * const url = facilpay.paymentLinks.getCheckoutUrl('plk_tok_123');
    * ```
    */
-  checkoutUrl(token: string): string {
-    return `${this.checkoutBaseUrl.replace(/\/$/, '')}/pay/${token}`;
+  getCheckoutUrl(token: string): string {
+    return `${this.checkoutBaseUrl}/pay/${token}`;
   }
 }

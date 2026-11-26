@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-import { FacilPay, Webhooks, type FacilPayEvent } from '@facilpay/sdk';
+import { FacilPay, createWebhookHandler } from '@facilpay/sdk';
 
 const apiKey = process.env.FACILPAY_API_KEY;
 if (!apiKey?.startsWith('fp_test_')) {
@@ -18,26 +18,30 @@ const facilpay = new FacilPay({
 });
 const app = express();
 
-app.post('/webhooks/facilpay', express.raw({ type: 'application/json' }), async (req, res) => {
-  const signature = req.get('X-FacilPay-Signature');
-  if (!signature || !Buffer.isBuffer(req.body)) {
-    res.sendStatus(400);
-    return;
-  }
-
-  let event: FacilPayEvent;
-  try {
-    event = await Webhooks.constructEvent<FacilPayEvent>(req.body, signature, webhookSecret);
-  } catch {
-    res.sendStatus(401);
-    return;
-  }
-
-  if (event.type === 'payment.completed') {
-    console.log('Payment completed:', event.data.id);
-  }
-  res.sendStatus(200);
-});
+/**
+ * POST /webhooks/facilpay
+ *
+ * createWebhookHandler.express reads the raw Buffer body delivered by
+ * express.raw(), verifies the HMAC signature, and dispatches to the matching
+ * handler. Register this route before express.json() so the middleware order
+ * never accidentally parses the body before signature verification.
+ */
+app.post(
+  '/webhooks/facilpay',
+  express.raw({ type: 'application/json' }),
+  createWebhookHandler.express({
+    secret: webhookSecret,
+    on: {
+      'payment.completed': async (event) => {
+        // event.data is typed as Payment — no cast needed.
+        console.log('Payment completed:', event.data.id, event.data.amount, event.data.currency);
+      },
+      'refund.issued': async (event) => {
+        console.log('Refund issued:', event.data.id, 'for payment', event.data.paymentId);
+      },
+    },
+  }),
+);
 
 app.get('/', async (_req, res) => {
   try {

@@ -38,12 +38,41 @@ describe('PaymentLinksResource', () => {
   });
 
   it('list gets /v1/payment-links with query params', async () => {
-    const page = { data: [] };
+    const page = { data: [{ id: 'pl_1' }], hasMore: false };
     http.get.mockResolvedValue(page);
-    await expect(links.list({ page: 2, limit: 10 })).resolves.toEqual(page);
+    const result = await links.list({ page: 2, limit: 10 });
     expect(http.get).toHaveBeenCalledWith('/v1/payment-links', {
       query: { page: 2, limit: 10 },
     });
+    await expect(result.toArray()).resolves.toEqual([{ id: 'pl_1' }]);
+  });
+
+  it('list preserves sort and filter params', async () => {
+    const page = { data: [], hasMore: false };
+    http.get.mockResolvedValue(page);
+    const result = await links.list({
+      page: 1,
+      limit: 5,
+      sort: '-createdAt',
+      status: 'active',
+    });
+    expect(http.get).toHaveBeenCalledWith('/v1/payment-links', {
+      query: { page: 1, limit: 5, sort: '-createdAt', status: 'active' },
+    });
+    await expect(result.toArray()).resolves.toEqual([]);
+  });
+
+  it('list supports for await pagination across pages', async () => {
+    http.get
+      .mockResolvedValueOnce({ data: [{ id: 'pl_1' }], hasMore: true })
+      .mockResolvedValueOnce({ data: [{ id: 'pl_2' }], hasMore: false });
+    const result = await links.list({ limit: 1 });
+    const ids: string[] = [];
+    for await (const link of result) {
+      ids.push((link as { id: string }).id);
+    }
+    expect(ids).toEqual(['pl_1', 'pl_2']);
+    expect(http.get).toHaveBeenCalledTimes(2);
   });
 
   it('retrieve gets /v1/payment-links/:token', async () => {

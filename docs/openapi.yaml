@@ -1,0 +1,2300 @@
+openapi: 3.1.0
+
+info:
+  title: FacilPay API
+  version: 0.1.0
+  description: |
+    The FacilPay REST API. This specification is derived from the official
+    `@facilpay/sdk` TypeScript SDK, whose resource modules, request/response
+    types, error classes and documentation are the authoritative reflection
+    of API behavior.
+
+    ## Authentication
+
+    FacilPay uses API keys for the majority of endpoints. Keys are prefixed
+    with `fp_test_` (sandbox/testnet environment) or `fp_live_` (production
+    environment); the prefix selects the environment.
+
+    Send the key in the `Authorization` header using the `ApiKey` scheme:
+
+    ```
+    Authorization: ApiKey fp_live_abc123...
+    ```
+
+    Managing API keys themselves (`/v1/api-keys/*`) is a privileged operation
+    that requires a **user JWT** instead, sent as a Bearer token:
+
+    ```
+    Authorization: Bearer <jwt>
+    ```
+
+    A single public endpoint (`GET /v1/payments/invoice/{token}`) requires no
+    authentication and is safe to call from unauthenticated, customer-facing
+    contexts.
+
+    ## Common headers
+
+    | Header             | Description                                                                 |
+    | ------------------ | --------------------------------------------------------------------------- |
+    | `Authorization`    | `ApiKey <fp_test_\|fp_live_>` for most calls, or `Bearer <jwt>` for key mgmt. |
+    | `Idempotency-Key`  | Prevents duplicate effects on retries of `POST`/`PUT`/`PATCH`/`DELETE`.     |
+    | `X-Correlation-Id` | Optional client trace id echoed back by the API.                           |
+    | `x-test-mode`      | Optional `true` to force test-mode behavior on supported write endpoints.   |
+
+    ## Errors
+
+    Every non-2xx response carries a JSON body with at least a `message`
+    field. Error responses also expose `x-request-id` and `x-correlation-id`
+    response headers, and `429` responses include `Retry-After`. See the
+    `ErrorResponse` schema and the per-status examples throughout.
+
+    ## Pagination
+
+    List endpoints return a page envelope `{ data, total, page, limit }`.
+    Recurring payments use an offset-based envelope `{ data, total, limit, offset }`.
+  license:
+    name: MIT
+    url: https://github.com/facilpay/facilpay-sdk/blob/main/LICENSE
+  contact:
+    name: FacilPay Support
+    url: https://facilpay.io
+    email: support@facilpay.io
+
+servers:
+  - url: https://api.facilpay.io
+    description: FacilPay API. Key prefix (`fp_test_` / `fp_live_`) selects the environment.
+
+tags:
+  - name: Payments
+    description: Create, retrieve, list, cancel, refund, export and inspect payments.
+  - name: Disputes
+    description: Open, list, update and provide evidence for payment disputes.
+  - name: Payment Links
+    description: Shareable, hosted checkout links.
+  - name: Recurring Payments
+    description: Subscription-style recurring charges with pause/resume/cancel.
+  - name: Webhooks
+    description: Register webhook endpoints and inspect/retry deliveries.
+  - name: API Keys
+    description: Provision, rotate, revoke and report on API keys. Requires user JWT.
+  - name: Stellar
+    description: Stellar account balances, assets, trustlines, transactions and testnet funding.
+
+security:
+  - apiKeyAuth: []
+
+paths:
+  # ───────────────────────── Payments ─────────────────────────
+  /v1/payments:
+    post:
+      tags: [Payments]
+      summary: Create a payment
+      operationId: createPayment
+      description: |
+        Creates a new payment. The SDK auto-generates an `Idempotency-Key` for
+        `POST` requests when one is not supplied, making retries safe. A
+        successful create emits a `payment.created` webhook.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+        - $ref: '#/components/parameters/TestModeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentDto'
+            examples:
+              simple:
+                summary: Simple payment
+                value:
+                  amount: 19.99
+                  currency: USD
+                  description: Order #1234
+              withSplits:
+                summary: Split payment
+                value:
+                  amount: 100
+                  currency: EUR
+                  splits:
+                    - accountId: acct_01H...
+                      percentage: 90
+                    - accountId: acct_01J...
+                      percentage: 10
+      responses:
+        '201':
+          description: Payment created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+              example:
+                id: pay_01HABC123DEF456GHI789
+                amount: 19.99
+                currency: USD
+                status: PENDING
+                description: Order #1234
+                createdAt: '2024-05-15T10:30:00.000Z'
+                updatedAt: '2024-05-15T10:30:00.000Z'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    get:
+      tags: [Payments]
+      summary: List payments
+      operationId: listPayments
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+          description: Filter by payment status (e.g. `PENDING`, `COMPLETED`, `FAILED`).
+          example: COMPLETED
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+          description: ISO 8601 lower bound on `createdAt`.
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+          description: ISO 8601 upper bound on `createdAt`.
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: sortBy
+          in: query
+          schema: { type: string }
+          description: Field to sort by.
+        - name: sortOrder
+          in: query
+          schema: { type: string, enum: [asc, desc] }
+      responses:
+        '200':
+          description: A page of payments.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentListResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payments/bulk:
+    post:
+      tags: [Payments]
+      summary: Bulk create payments
+      operationId: createPaymentsBulk
+      description: |
+        Creates several payments in a single request. Partial failures are
+        surfaced through the `failures` array rather than rejecting the whole
+        batch. Bulk creation does **not** support idempotency keys.
+      parameters:
+        - $ref: '#/components/parameters/TestModeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items: { $ref: '#/components/schemas/CreatePaymentDto' }
+                  minItems: 1
+            example:
+              items:
+                - { amount: 10.5, currency: EUR }
+                - { amount: 20, currency: EUR }
+      responses:
+        '200':
+          description: Per-item successes and failures.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BulkCreatePaymentsResponseDto' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /v1/payments/export:
+    get:
+      tags: [Payments]
+      summary: Export payments as CSV
+      operationId: exportPayments
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: merchantId
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: CSV text.
+          content:
+            text/csv:
+              schema: { type: string }
+              example: |
+                id,amount,currency,status
+                pay_01H...,19.99,USD,COMPLETED
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payments/{paymentId}:
+    parameters:
+      - $ref: '#/components/parameters/PaymentIdPath'
+    get:
+      tags: [Payments]
+      summary: Retrieve a payment
+      operationId: retrievePayment
+      responses:
+        '200':
+          description: The payment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payments/{paymentId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/PaymentIdPath'
+    post:
+      tags: [Payments]
+      summary: Cancel a payment
+      operationId: cancelPayment
+      description: Cancels a payment that has not yet settled.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+        - $ref: '#/components/parameters/TestModeHeader'
+      responses:
+        '200':
+          description: The cancelled payment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payments/{paymentId}/refund:
+    parameters:
+      - $ref: '#/components/parameters/PaymentIdPath'
+    post:
+      tags: [Payments]
+      summary: Refund a payment
+      operationId: refundPayment
+      description: |
+        Omit `amount` to refund the full remaining balance (payment moves to
+        `REFUNDED`); pass an `amount` for a partial refund (payment moves to
+        `PARTIALLY_REFUNDED`). Emits a `refund.issued` webhook on success.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+        - $ref: '#/components/parameters/TestModeHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefundPaymentDto' }
+            examples:
+              full:
+                summary: Full refund
+                value: {}
+              partial:
+                summary: Partial refund
+                value:
+                  amount: 5
+                  reason: Damaged item
+      responses:
+        '200':
+          description: The issued refund.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Refund' }
+              example:
+                id: rfnd_01HABC123DEF456GHI789
+                paymentId: pay_01HABC123DEF456GHI789
+                amount: 5
+                currency: USD
+                status: issued
+                reason: Damaged item
+                createdAt: '2024-05-15T12:00:00.000Z'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payments/{paymentId}/timeline:
+    parameters:
+      - $ref: '#/components/parameters/PaymentIdPath'
+    get:
+      tags: [Payments]
+      summary: Retrieve a payment timeline
+      operationId: getPaymentTimeline
+      responses:
+        '200':
+          description: Ordered timeline events for the payment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentTimeline' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payments/{paymentId}/invoice:
+    parameters:
+      - $ref: '#/components/parameters/PaymentIdPath'
+    get:
+      tags: [Payments]
+      summary: Retrieve the invoice for a payment
+      operationId: getPaymentInvoice
+      responses:
+        '200':
+          description: The payment invoice.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentInvoice' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payments/invoice/{token}:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        schema: { type: string }
+        description: Shareable invoice token.
+    get:
+      tags: [Payments]
+      summary: Retrieve a public invoice by token
+      operationId: getPublicInvoice
+      description: |
+        Public endpoint — **no authentication required**. Safe to call from
+        unauthenticated, customer-facing checkout pages.
+      security: []
+      responses:
+        '200':
+          description: The invoice.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentInvoice' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payments/{paymentId}/qr:
+    parameters:
+      - $ref: '#/components/parameters/PaymentIdPath'
+    get:
+      tags: [Payments]
+      summary: Retrieve the QR code for a payment
+      operationId: getPaymentQrCode
+      parameters:
+        - name: format
+          in: query
+          schema: { type: string, enum: [png, svg], default: png }
+      responses:
+        '200':
+          description: |
+            The QR code. The API returns a data URL when the content type is
+            textual, or the raw image bytes when binary.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/svg+xml:
+              schema: { type: string }
+            application/json:
+              schema:
+                type: string
+                description: A `data:` URL embedding the image.
+                example: data:image/png;base64,iVBORw0KGgo...
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payments/{paymentId}/dispute:
+    parameters:
+      - $ref: '#/components/parameters/PaymentIdPath'
+    post:
+      tags: [Disputes]
+      summary: Open a dispute on a payment
+      operationId: createDispute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateDisputeDto' }
+            example:
+              reason: fraudulent
+              amount: 19.99
+              currency: USD
+      responses:
+        '201':
+          description: The newly opened dispute. Emits `dispute.opened`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dispute' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  # ───────────────────────── Disputes ─────────────────────────
+  /v1/disputes:
+    get:
+      tags: [Disputes]
+      summary: List disputes
+      operationId: listDisputes
+      parameters:
+        - name: paymentId
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/DisputeStatus' }
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: A page of disputes.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DisputeListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/disputes/{disputeId}:
+    parameters:
+      - $ref: '#/components/parameters/DisputeIdPath'
+    get:
+      tags: [Disputes]
+      summary: Retrieve a dispute
+      operationId: retrieveDispute
+      responses:
+        '200':
+          description: The dispute.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dispute' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    patch:
+      tags: [Disputes]
+      summary: Update a dispute
+      operationId: updateDispute
+      description: Update evidence or status.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateDisputeDto' }
+            example:
+              evidence:
+                trackingNumber: 1Z999AA10123456789
+      responses:
+        '200':
+          description: The updated dispute.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dispute' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/disputes/{disputeId}/evidence:
+    parameters:
+      - $ref: '#/components/parameters/DisputeIdPath'
+    post:
+      tags: [Disputes]
+      summary: Upload evidence for a dispute
+      operationId: uploadDisputeEvidence
+      description: |
+        Uploads an evidence file (receipt, screenshot, shipping proof) as
+        `multipart/form-data`. Accepts a single file or a prebuilt `FormData`.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The evidence file.
+                description:
+                  type: string
+                  description: Optional text field describing the evidence.
+      responses:
+        '200':
+          description: The dispute with the new evidence attached.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dispute' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413':
+          description: Uploaded file too large.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  # ───────────────────────── Payment Links ─────────────────────────
+  /v1/payment-links:
+    post:
+      tags: [Payment Links]
+      summary: Create a payment link
+      operationId: createPaymentLink
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePaymentLinkParams' }
+            example:
+              amount: 25
+              currency: USD
+              description: Spring sale
+              expiresAt: '2024-05-22T10:30:00.000Z'
+      responses:
+        '201':
+          description: The created payment link.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentLink' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    get:
+      tags: [Payment Links]
+      summary: List payment links
+      operationId: listPaymentLinks
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: sortBy
+          in: query
+          schema: { type: string, enum: [createdAt, amount, views, completions, updatedAt] }
+        - name: sortOrder
+          in: query
+          schema: { type: string, enum: [asc, desc] }
+      responses:
+        '200':
+          description: A page of payment links.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListPaymentLinksResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payment-links/{token}:
+    parameters:
+      - $ref: '#/components/parameters/PaymentLinkTokenPath'
+    get:
+      tags: [Payment Links]
+      summary: Retrieve a payment link by token
+      operationId: retrievePaymentLink
+      responses:
+        '200':
+          description: The payment link.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentLink' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    patch:
+      tags: [Payment Links]
+      summary: Update a payment link
+      operationId: updatePaymentLink
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdatePaymentLinkParams' }
+            example:
+              description: Spring sale — updated
+      responses:
+        '200':
+          description: The updated payment link.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentLink' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    delete:
+      tags: [Payment Links]
+      summary: Deactivate a payment link
+      operationId: deactivatePaymentLink
+      description: Deactivates a payment link so it can no longer be paid.
+      responses:
+        '200':
+          description: "The deactivated payment link (`active: false`)."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentLink' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payment-links/{token}/redeem:
+    parameters:
+      - $ref: '#/components/parameters/PaymentLinkTokenPath'
+    post:
+      tags: [Payment Links]
+      summary: Redeem a payment link
+      operationId: redeemPaymentLink
+      description: Starts a payment for a payment link.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Optional payer details forwarded to the API.
+            example:
+              payerEmail: buyer@example.com
+      responses:
+        '200':
+          description: The redeemed payment link.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentLink' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/payment-links/{token}/qr:
+    parameters:
+      - $ref: '#/components/parameters/PaymentLinkTokenPath'
+    get:
+      tags: [Payment Links]
+      summary: Retrieve the QR code for a payment link
+      operationId: getPaymentLinkQrCode
+      responses:
+        '200':
+          description: The token and the URL encoded in the QR code.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QrCodeResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  # ───────────────────────── Recurring Payments ─────────────────────────
+  /v1/recurring-payments:
+    post:
+      tags: [Recurring Payments]
+      summary: Create a recurring payment
+      operationId: createRecurringPayment
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRecurringPaymentDto' }
+            example:
+              customerId: cus_01HABC123DEF456GHI789
+              amount: 9.99
+              currency: USD
+              interval: monthly
+      responses:
+        '201':
+          description: The created recurring payment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecurringPayment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    get:
+      tags: [Recurring Payments]
+      summary: List recurring payments
+      operationId: listRecurringPayments
+      parameters:
+        - name: customerId
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/RecurringPaymentStatus' }
+        - $ref: '#/components/parameters/LimitParam'
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: An offset-paginated list of recurring payments.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListRecurringPaymentsResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/recurring-payments/{id}:
+    parameters:
+      - $ref: '#/components/parameters/RecurringPaymentIdPath'
+    get:
+      tags: [Recurring Payments]
+      summary: Retrieve a recurring payment
+      operationId: retrieveRecurringPayment
+      responses:
+        '200':
+          description: The recurring payment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecurringPayment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    patch:
+      tags: [Recurring Payments]
+      summary: Update a recurring payment
+      operationId: updateRecurringPayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateRecurringPaymentDto' }
+            example:
+              amount: 12.99
+      responses:
+        '200':
+          description: The updated recurring payment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecurringPayment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/recurring-payments/{id}/pause:
+    parameters:
+      - $ref: '#/components/parameters/RecurringPaymentIdPath'
+    post:
+      tags: [Recurring Payments]
+      summary: Pause a recurring payment
+      operationId: pauseRecurringPayment
+      responses:
+        '200':
+          description: The paused recurring payment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecurringPayment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/recurring-payments/{id}/resume:
+    parameters:
+      - $ref: '#/components/parameters/RecurringPaymentIdPath'
+    post:
+      tags: [Recurring Payments]
+      summary: Resume a paused recurring payment
+      operationId: resumeRecurringPayment
+      responses:
+        '200':
+          description: The resumed recurring payment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecurringPayment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/recurring-payments/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/RecurringPaymentIdPath'
+    post:
+      tags: [Recurring Payments]
+      summary: Cancel a recurring payment
+      operationId: cancelRecurringPayment
+      description: Cancelled recurring payments cannot be resumed.
+      responses:
+        '200':
+          description: The cancelled recurring payment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecurringPayment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  # ───────────────────────── Webhooks ─────────────────────────
+  /v1/webhooks:
+    post:
+      tags: [Webhooks]
+      summary: Register a webhook endpoint
+      operationId: createWebhook
+      description: |
+        The returned `secret` (`whsec_…`) is only returned in full here and
+        after rotation. Store it immediately — it cannot be retrieved again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateWebhookParams' }
+            example:
+              url: https://example.com/webhooks/facilpay
+              events: [payment.succeeded, payment.failed]
+      responses:
+        '201':
+          description: The registered endpoint, including its signing `secret`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    get:
+      tags: [Webhooks]
+      summary: List webhook endpoints
+      operationId: listWebhooks
+      responses:
+        '200':
+          description: All registered webhook endpoints.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/webhooks/{webhookId}:
+    parameters:
+      - $ref: '#/components/parameters/WebhookIdPath'
+    get:
+      tags: [Webhooks]
+      summary: Retrieve a webhook endpoint
+      operationId: retrieveWebhook
+      responses:
+        '200':
+          description: The webhook endpoint (without its secret).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    patch:
+      tags: [Webhooks]
+      summary: Update a webhook endpoint
+      operationId: updateWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateWebhookParams' }
+            example:
+              isActive: false
+      responses:
+        '200':
+          description: The updated webhook endpoint.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    delete:
+      tags: [Webhooks]
+      summary: Delete a webhook endpoint
+      operationId: deleteWebhook
+      responses:
+        '204':
+          description: Endpoint deleted.
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/webhooks/{webhookId}/deliveries:
+    parameters:
+      - $ref: '#/components/parameters/WebhookIdPath'
+    get:
+      tags: [Webhooks]
+      summary: List deliveries for a webhook endpoint
+      operationId: listWebhookDeliveries
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: event
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: A page of delivery attempts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDeliveryListResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/webhooks/{webhookId}/test:
+    parameters:
+      - $ref: '#/components/parameters/WebhookIdPath'
+    post:
+      tags: [Webhooks]
+      summary: Send a test delivery to a webhook endpoint
+      operationId: sendWebhookTest
+      responses:
+        '200':
+          description: Result of the test delivery.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookTestResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/webhooks/{webhookId}/rotate-secret:
+    parameters:
+      - $ref: '#/components/parameters/WebhookIdPath'
+    post:
+      tags: [Webhooks]
+      summary: Rotate a webhook endpoint's signing secret
+      operationId: rotateWebhookSecret
+      description: Returns the endpoint with its new one-time `secret`.
+      responses:
+        '200':
+          description: The endpoint with its new signing `secret`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/webhooks/deliveries/{deliveryId}/retry:
+    parameters:
+      - $ref: '#/components/parameters/DeliveryIdPath'
+    post:
+      tags: [Webhooks]
+      summary: Retry a webhook delivery
+      operationId: retryWebhookDelivery
+      responses:
+        '200':
+          description: The delivery id and its new status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDeliveryRetryResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  # ───────────────────────── API Keys (JWT auth) ─────────────────────────
+  /v1/api-keys:
+    post:
+      tags: [API Keys]
+      summary: Create an API key
+      operationId: createApiKey
+      security: [ { bearerAuth: [] } ]
+      description: |
+        Requires a user JWT. The returned plaintext `key` is shown only once
+        and is never logged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateApiKeyParams' }
+            example:
+              name: Checkout server
+              environment: test
+              scopes: [payments:write]
+      responses:
+        '201':
+          description: The created key, including the one-time plaintext `key`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    get:
+      tags: [API Keys]
+      summary: List API keys
+      operationId: listApiKeys
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Every API key of the account (without plaintext secrets).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApiKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/api-keys/{keyId}:
+    parameters:
+      - $ref: '#/components/parameters/ApiKeyIdPath'
+    get:
+      tags: [API Keys]
+      summary: Retrieve an API key
+      operationId: retrieveApiKey
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: The API key (without its plaintext secret).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKey' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    patch:
+      tags: [API Keys]
+      summary: Update an API key
+      operationId: updateApiKey
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateApiKeyParams' }
+            example:
+              allowedIps: ['203.0.113.10']
+      responses:
+        '200':
+          description: The updated API key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKey' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    delete:
+      tags: [API Keys]
+      summary: Revoke an API key
+      operationId: revokeApiKey
+      security: [ { bearerAuth: [] } ]
+      description: Requests made with a revoked key fail with `401`.
+      responses:
+        '200':
+          description: The revoked API key, with `revokedAt` set.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKey' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/api-keys/{keyId}/rotate:
+    parameters:
+      - $ref: '#/components/parameters/ApiKeyIdPath'
+    post:
+      tags: [API Keys]
+      summary: Rotate an API key
+      operationId: rotateApiKey
+      security: [ { bearerAuth: [] } ]
+      description: Returns the key with its new one-time plaintext `key`.
+      responses:
+        '200':
+          description: The API key with its new one-time plaintext `key`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKey' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/api-keys/{keyId}/usage:
+    parameters:
+      - $ref: '#/components/parameters/ApiKeyIdPath'
+    get:
+      tags: [API Keys]
+      summary: Fetch usage statistics for an API key
+      operationId: getApiKeyUsage
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: interval
+          in: query
+          schema: { type: string, enum: [hour, day, month] }
+      responses:
+        '200':
+          description: Request counts for the key over the requested period.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyUsage' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  # ───────────────────────── Stellar ─────────────────────────
+  /v1/stellar/balances:
+    get:
+      tags: [Stellar]
+      summary: List Stellar balances
+      operationId: listStellarBalances
+      parameters:
+        - $ref: '#/components/parameters/TestModeHeader'
+      responses:
+        '200':
+          description: One entry per asset held by the account.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/StellarBalance' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/stellar/assets:
+    get:
+      tags: [Stellar]
+      summary: List Stellar assets available to the account
+      operationId: listStellarAssets
+      parameters:
+        - $ref: '#/components/parameters/TestModeHeader'
+      responses:
+        '200':
+          description: The available assets.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/StellarAsset' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/stellar/assets/trustline:
+    post:
+      tags: [Stellar]
+      summary: Add a trustline for an asset
+      operationId: addStellarTrustline
+      parameters:
+        - $ref: '#/components/parameters/TestModeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TrustlineParams' }
+            example:
+              assetCode: USDC
+              issuer: GABC...
+      responses:
+        '204':
+          description: Trustline added.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+    delete:
+      tags: [Stellar]
+      summary: Remove a trustline for an asset
+      operationId: removeStellarTrustline
+      parameters:
+        - $ref: '#/components/parameters/TestModeHeader'
+        - name: assetCode
+          in: query
+          required: true
+          schema: { type: string }
+        - name: issuer
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Trustline removed.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/stellar/transactions:
+    get:
+      tags: [Stellar]
+      summary: List Stellar transactions
+      operationId: listStellarTransactions
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: assetCode
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: The matching transactions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/StellarTransaction' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/stellar/transactions/{transactionId}/sign:
+    parameters:
+      - $ref: '#/components/parameters/StellarTransactionIdPath'
+    post:
+      tags: [Stellar]
+      summary: Attach a signature to a multisig transaction
+      operationId: signStellarTransaction
+      description: Multisig progress is reported via `transaction.multisig_*` webhooks.
+      parameters:
+        - $ref: '#/components/parameters/TestModeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SignTransactionParams' }
+            example:
+              signature: rST...
+              publicKey: GABC...
+      responses:
+        '200':
+          description: The transaction with its updated signature count.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StellarTransaction' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/stellar/mode:
+    get:
+      tags: [Stellar]
+      summary: Retrieve the current Stellar network mode
+      operationId: getStellarMode
+      parameters:
+        - $ref: '#/components/parameters/TestModeHeader'
+      responses:
+        '200':
+          description: The network mode.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StellarMode' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+  /v1/stellar/fund-testnet:
+    post:
+      tags: [Stellar]
+      summary: Fund a Stellar address on testnet
+      operationId: fundStellarTestnet
+      description: Only available with a test (`fp_test_`) key.
+      parameters:
+        - $ref: '#/components/parameters/TestModeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FundTestnetParams' }
+            example:
+              address: GABC...
+      responses:
+        '200':
+          description: The funded address and the funding transaction hash.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FundTestnetResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '5xx': { $ref: '#/components/responses/ServerError' }
+
+# ───────────────────────── Outbound webhook deliveries ─────────────────────────
+webhooks:
+  payment.created:
+    post:
+      tags: [Webhooks]
+      summary: payment.created
+      operationId: webhookPaymentCreated
+      description: Delivered when a new payment is created.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentCreatedWebhook' }
+      responses:
+        '200':
+          description: Acknowledged. The event will not be retried.
+        '400':
+          description: The API treats this as a delivery failure and may retry.
+  payment.completed:
+    post:
+      tags: [Webhooks]
+      summary: payment.completed
+      operationId: webhookPaymentCompleted
+      description: Delivered when a payment is successfully completed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentCompletedWebhook' }
+      responses:
+        '200': { description: Acknowledged. }
+        '400': { description: Delivery failure. }
+  payment.failed:
+    post:
+      tags: [Webhooks]
+      summary: payment.failed
+      operationId: webhookPaymentFailed
+      description: Delivered when a payment fails.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentFailedWebhook' }
+      responses:
+        '200': { description: Acknowledged. }
+        '400': { description: Delivery failure. }
+  payment.expired:
+    post:
+      tags: [Webhooks]
+      summary: payment.expired
+      operationId: webhookPaymentExpired
+      description: Delivered when a payment expires without being completed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentExpiredWebhook' }
+      responses:
+        '200': { description: Acknowledged. }
+        '400': { description: Delivery failure. }
+  payment.split_processed:
+    post:
+      tags: [Webhooks]
+      summary: payment.split_processed
+      operationId: webhookPaymentSplitProcessed
+      description: Delivered when a split payment has been processed to all recipients.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentSplitProcessedWebhook' }
+      responses:
+        '200': { description: Acknowledged. }
+        '400': { description: Delivery failure. }
+  refund.issued:
+    post:
+      tags: [Webhooks]
+      summary: refund.issued
+      operationId: webhookRefundIssued
+      description: Delivered when a refund is issued.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefundIssuedWebhook' }
+      responses:
+        '200': { description: Acknowledged. }
+        '400': { description: Delivery failure. }
+  dispute.opened:
+    post:
+      tags: [Webhooks]
+      summary: dispute.opened
+      operationId: webhookDisputeOpened
+      description: Delivered when a dispute is opened.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DisputeOpenedWebhook' }
+      responses:
+        '200': { description: Acknowledged. }
+        '400': { description: Delivery failure. }
+  transaction.multisig_required:
+    post:
+      tags: [Webhooks]
+      summary: transaction.multisig_required
+      operationId: webhookTransactionMultisigRequired
+      description: Delivered when a Stellar transaction requires additional signatures.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransactionMultisigRequiredWebhook' }
+      responses:
+        '200': { description: Acknowledged. }
+        '400': { description: Delivery failure. }
+  transaction.multisig_completed:
+    post:
+      tags: [Webhooks]
+      summary: transaction.multisig_completed
+      operationId: webhookTransactionMultisigCompleted
+      description: Delivered when all required signatures are collected and the transaction is submitted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransactionMultisigCompletedWebhook' }
+      responses:
+        '200': { description: Acknowledged. }
+        '400': { description: Delivery failure. }
+  test:
+    post:
+      tags: [Webhooks]
+      summary: test
+      operationId: webhookTest
+      description: Sent when you validate your webhook endpoint in the dashboard.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TestWebhook' }
+      responses:
+        '200': { description: Acknowledged. }
+        '400': { description: Delivery failure. }
+
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: |
+        API key authentication. Send `Authorization: ApiKey <key>` where `<key>`
+        is prefixed with `fp_test_` (sandbox) or `fp_live_` (production).
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: User JWT for API key management endpoints (`/v1/api-keys/*`).
+
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      description: 1-based page number.
+      schema: { type: integer, minimum: 1, default: 1 }
+    LimitParam:
+      name: limit
+      in: query
+      description: Page size.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    PaymentIdPath:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string }
+      description: Payment id (e.g. `pay_01H...`).
+      example: pay_01HABC123DEF456GHI789
+    DisputeIdPath:
+      name: disputeId
+      in: path
+      required: true
+      schema: { type: string }
+      description: Dispute id (e.g. `dsp_01H...`).
+      example: dsp_01HABC123DEF456GHI789
+    PaymentLinkTokenPath:
+      name: token
+      in: path
+      required: true
+      schema: { type: string }
+      description: Payment link token (e.g. `plk_tok_...`).
+    RecurringPaymentIdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Recurring payment id (e.g. `rp_...`).
+      example: rp_01HABC123DEF456GHI789
+    WebhookIdPath:
+      name: webhookId
+      in: path
+      required: true
+      schema: { type: string }
+      description: Webhook endpoint id (e.g. `wh_123`).
+      example: wh_123
+    DeliveryIdPath:
+      name: deliveryId
+      in: path
+      required: true
+      schema: { type: string }
+      description: Delivery id (e.g. `whd_123`).
+      example: whd_123
+    ApiKeyIdPath:
+      name: keyId
+      in: path
+      required: true
+      schema: { type: string }
+      description: API key id (e.g. `key_123`).
+      example: key_123
+    StellarTransactionIdPath:
+      name: transactionId
+      in: path
+      required: true
+      schema: { type: string }
+      description: Stellar transaction id (e.g. `tx_123`).
+      example: tx_123
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string }
+      description: |
+        Prevents duplicate effects when retrying `POST`/`PUT`/`PATCH`/`DELETE`.
+        Reusing a key with a different body returns `422`. Keys expire after
+        24 hours.
+    TestModeHeader:
+      name: x-test-mode
+      in: header
+      required: false
+      schema: { type: string, enum: ['true'] }
+      description: When `true`, forces test-mode behavior on supported endpoints.
+
+  responses:
+    BadRequest:
+      description: Malformed request or invalid parameters.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { message: 'amount must be a number greater than or equal to 0.01.' }
+    Unauthorized:
+      description: Missing, invalid or revoked API key, or missing user JWT.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { message: 'Unauthorized.' }
+    Forbidden:
+      description: The key lacks the required scope, the IP is not allowlisted, or access is geo-blocked.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { message: 'Forbidden: missing payments:write scope.' }
+    NotFound:
+      description: Resource does not exist.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { message: 'Payment not found.' }
+    Conflict:
+      description: Resource state conflict (e.g. refunding an already refunded payment).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { message: 'Payment is already refunded.' }
+    UnprocessableEntity:
+      description: Validation failed, or an idempotency key was reused with a different body.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { message: 'Invalid currency code.' }
+    RateLimited:
+      description: Rate limited. Honor the `Retry-After` response header.
+      headers:
+        Retry-After:
+          schema: { type: string }
+          description: Seconds to wait before retrying.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { message: 'Too many requests.' }
+    ServerError:
+      description: Server-side error. Safe to retry with backoff.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example: { message: 'Internal server error.' }
+
+  schemas:
+    # ── Shared ──
+    ErrorResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Human-readable error message.
+        code:
+          type: string
+          description: Optional machine-readable error code.
+        details:
+          type: object
+          additionalProperties: true
+          description: Optional field-level validation details.
+      description: |
+        Every non-2xx response carries at least a `message`. The response
+        headers also include `x-request-id` and `x-correlation-id`.
+
+    # ── Payments ──
+    Payment:
+      type: object
+      required: [id, amount, currency, status, createdAt, updatedAt]
+      properties:
+        id: { type: string, example: pay_01HABC123DEF456GHI789 }
+        amount: { type: number, example: 19.99 }
+        currency: { type: string, example: USD, description: ISO 4217 currency code. }
+        status:
+          type: string
+          description: |
+            Payment status. Known values include `PENDING`, `COMPLETED`,
+            `FAILED`, `EXPIRED`, `REFUNDED`, `PARTIALLY_REFUNDED`, `CANCELLED`.
+            The set may grow; do not treat it as a closed enum.
+          example: COMPLETED
+        reference: { type: [string, "null"] }
+        description: { type: [string, "null"] }
+        customerId: { type: [string, "null"], description: Customer id when available. }
+        expiresAt: { type: [string, "null"], format: date-time }
+        stellarTransactionId: { type: [string, "null"] }
+        failureReason: { type: [string, "null"] }
+        completedAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreatePaymentDto:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: number
+          minimum: 0.01
+          example: 19.99
+          description: Amount in the smallest currency unit; must be >= 0.01.
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          example: USD
+          description: ISO 4217 currency code (exactly 3 characters).
+        description: { type: string, maxLength: 500 }
+        callbackUrl: { type: string, format: uri }
+        merchantId: { type: string }
+        merchantEmail: { type: string, format: email }
+        payerEmail: { type: string, format: email }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+          description: Up to 20 entries; values up to 500 characters.
+          example: { orderId: '1234' }
+        expiresIn: { type: integer, description: Lifetime of the payment in seconds. }
+        paymentLinkId: { type: string }
+        splits:
+          type: array
+          items: { $ref: '#/components/schemas/PaymentSplit' }
+          description: Split configuration; percentages must sum to 100.
+
+    PaymentSplit:
+      type: object
+      required: [accountId, percentage]
+      properties:
+        accountId: { type: string, description: Account receiving the split. }
+        percentage:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Percentage of the payment routed to this account.
+
+    Refund:
+      type: object
+      required: [id, paymentId, amount, currency, status, createdAt]
+      properties:
+        id: { type: string, example: rfnd_01HABC123DEF456GHI789 }
+        paymentId: { type: string, example: pay_01HABC123DEF456GHI789 }
+        amount: { type: number, example: 5 }
+        currency: { type: string, example: USD }
+        status: { type: string, example: issued }
+        reason: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+
+    RefundPaymentDto:
+      type: object
+      properties:
+        amount:
+          type: number
+          minimum: 0.01
+          description: Omit to refund the full remaining balance.
+        reason: { type: string }
+
+    BulkCreatePaymentResult:
+      type: object
+      required: [index, success]
+      properties:
+        index: { type: integer, description: Index of the item in the original request. }
+        success: { type: boolean }
+        payment: { anyOf: [ { $ref: '#/components/schemas/Payment' }, { type: "null" } ] }
+        error: { type: [string, "null"] }
+
+    BulkCreatePaymentsResponseDto:
+      type: object
+      required: [successes, failures]
+      properties:
+        successes:
+          type: array
+          items: { $ref: '#/components/schemas/BulkCreatePaymentResult' }
+        failures:
+          type: array
+          items: { $ref: '#/components/schemas/BulkCreatePaymentResult' }
+
+    PaymentListResponse:
+      type: object
+      required: [data, total, page, limit]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Payment' }
+        total: { type: integer, example: 137 }
+        page: { type: integer, example: 1 }
+        limit: { type: integer, example: 20 }
+
+    PaymentTimelineEntry:
+      type: object
+      required: [event, timestamp]
+      properties:
+        event: { type: string, example: payment.created }
+        timestamp: { type: string, format: date-time }
+        description: { type: [string, "null"] }
+        data:
+          type: [object, "null"]
+          additionalProperties: true
+
+    PaymentTimeline:
+      type: object
+      required: [paymentId, entries]
+      properties:
+        paymentId: { type: string, example: pay_01HABC123DEF456GHI789 }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/PaymentTimelineEntry' }
+
+    PaymentInvoice:
+      type: object
+      required: [id, paymentId, token, url, issuedAt]
+      properties:
+        id: { type: string }
+        paymentId: { type: string }
+        token: { type: string, description: Publicly shareable invoice token. }
+        url: { type: string, format: uri, description: Hosted invoice URL. }
+        issuedAt: { type: string, format: date-time }
+        paidAt: { type: [string, "null"], format: date-time }
+
+    # ── Disputes ──
+    DisputeStatus:
+      type: string
+      enum: [OPENED, UNDER_REVIEW, EVIDENCE_REQUIRED, WON, LOST, CLOSED]
+
+    Dispute:
+      type: object
+      required: [id, paymentId, status, createdAt, updatedAt]
+      properties:
+        id: { type: string, example: dsp_01HABC123DEF456GHI789 }
+        paymentId: { type: string, example: pay_01HABC123DEF456GHI789 }
+        status: { $ref: '#/components/schemas/DisputeStatus' }
+        reason: { type: [string, "null"], example: NOT_RECEIVED }
+        amount: { type: [number, "null"] }
+        currency: { type: [string, "null"] }
+        evidence:
+          type: [object, "null"]
+          additionalProperties: true
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreateDisputeDto:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, example: fraudulent }
+        amount: { type: number }
+        currency: { type: string }
+        evidence:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+
+    UpdateDisputeDto:
+      type: object
+      properties:
+        status: { $ref: '#/components/schemas/DisputeStatus' }
+        evidence:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+
+    DisputeListResponse:
+      type: object
+      required: [data, total, page, limit]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Dispute' }
+        total: { type: integer }
+        page: { type: integer }
+        limit: { type: integer }
+
+    # ── Payment Links ──
+    PaymentLink:
+      type: object
+      required: [id, token, amount, currency, views, completions, active, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        token: { type: string }
+        amount: { type: number, example: 25 }
+        currency: { type: string, example: USD }
+        description: { type: [string, "null"] }
+        expiresAt: { type: [string, "null"], format: date-time }
+        views: { type: integer, example: 42 }
+        completions: { type: integer, example: 7 }
+        active: { type: boolean, example: true }
+        url: { type: [string, "null"], format: uri, description: Hosted checkout URL. }
+        status: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreatePaymentLinkParams:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: number, example: 25 }
+        currency: { type: string, example: USD }
+        description: { type: string }
+        expiresAt: { type: string, format: date-time, description: ISO 8601 expiry. }
+
+    UpdatePaymentLinkParams:
+      type: object
+      properties:
+        amount: { type: number }
+        currency: { type: string }
+        description: { type: string }
+        expiresAt: { type: string, format: date-time }
+
+    ListPaymentLinksResponse:
+      type: object
+      required: [data, page, limit, total]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/PaymentLink' }
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+
+    QrCodeResponse:
+      type: object
+      required: [token, url]
+      properties:
+        token: { type: string }
+        url: { type: string, format: uri }
+
+    # ── Recurring Payments ──
+    RecurringInterval:
+      type: string
+      enum: [daily, weekly, monthly, yearly]
+
+    RecurringPaymentStatus:
+      type: string
+      enum: [active, paused, cancelled, completed]
+
+    RecurringPayment:
+      type: object
+      required: [id, customerId, amount, currency, interval, intervalCount, status, createdAt, updatedAt]
+      properties:
+        id: { type: string, example: rp_01HABC123DEF456GHI789 }
+        customerId: { type: string, example: cus_01HABC123DEF456GHI789 }
+        amount: { type: number, example: 9.99 }
+        currency: { type: string, example: USD }
+        interval: { $ref: '#/components/schemas/RecurringInterval' }
+        intervalCount: { type: integer, example: 1, description: Number of intervals between charges. }
+        status: { $ref: '#/components/schemas/RecurringPaymentStatus' }
+        description: { type: [string, "null"] }
+        metadata:
+          type: [object, "null"]
+          additionalProperties: { type: string }
+        startDate: { type: [string, "null"], format: date-time }
+        trialDays: { type: [integer, "null"] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreateRecurringPaymentDto:
+      type: object
+      required: [customerId, amount, currency, interval]
+      properties:
+        customerId: { type: string }
+        amount: { type: number }
+        currency: { type: string }
+        interval: { $ref: '#/components/schemas/RecurringInterval' }
+        intervalCount: { type: integer, description: Defaults to 1. }
+        description: { type: string }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+        startDate: { type: string, format: date-time }
+        trialDays: { type: integer }
+
+    UpdateRecurringPaymentDto:
+      type: object
+      properties:
+        amount: { type: number }
+        description: { type: string }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+
+    ListRecurringPaymentsResponse:
+      type: object
+      required: [data, total, limit, offset]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/RecurringPayment' }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+
+    # ── Webhooks ──
+    WebhookEvent:
+      type: string
+      description: |
+        Event name a webhook endpoint subscribes to. Note this is the
+        *subscription* set, which differs slightly from the *delivered* event
+        type literals (e.g. `payment.succeeded` here vs `payment.completed`
+        delivered).
+      enum:
+        - payment.created
+        - payment.succeeded
+        - payment.failed
+        - payment.refunded
+        - payment_link.created
+        - payment_link.paid
+        - dispute.created
+        - dispute.updated
+        - dispute.closed
+        - recurring_payment.created
+        - recurring_payment.charged
+        - recurring_payment.failed
+        - recurring_payment.cancelled
+
+    WebhookEndpoint:
+      type: object
+      required: [id, url, events, isActive, createdAt, updatedAt]
+      properties:
+        id: { type: string, example: wh_123 }
+        url: { type: string, format: uri, example: https://example.com/webhooks/facilpay }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEvent' }
+        isActive: { type: boolean, example: true }
+        secret:
+          type: [string, "null"]
+          description: |
+            Signing secret (`whsec_…`). Only returned on creation and after
+            rotation. Store it immediately.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreateWebhookParams:
+      type: object
+      required: [url, events]
+      properties:
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEvent' }
+
+    UpdateWebhookParams:
+      type: object
+      properties:
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEvent' }
+        isActive: { type: boolean }
+
+    WebhookTestResult:
+      type: object
+      required: [delivered]
+      properties:
+        delivered: { type: boolean }
+        statusCode: { type: [integer, "null"] }
+        error: { type: [string, "null"] }
+
+    WebhookDeliveryRetryResult:
+      type: object
+      required: [deliveryId, status]
+      properties:
+        deliveryId: { type: string }
+        status: { type: string }
+
+    WebhookDelivery:
+      type: object
+      required: [id, webhookId, event, status, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        webhookId: { type: string }
+        event: { $ref: '#/components/schemas/WebhookEvent' }
+        status: { type: string, example: delivered }
+        statusCode: { type: [integer, "null"] }
+        attempts: { type: [integer, "null"] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    WebhookDeliveryListResponse:
+      type: object
+      required: [data, total, page, limit]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookDelivery' }
+        total: { type: integer }
+        page: { type: integer }
+        limit: { type: integer }
+
+    # ── API Keys ──
+    ApiKeyScope:
+      type: string
+      enum:
+        - payments:read
+        - payments:write
+        - refunds:read
+        - refunds:write
+        - customers:read
+        - customers:write
+        - webhooks:read
+        - webhooks:write
+
+    ApiKeyEnvironment:
+      type: string
+      enum: [test, live]
+
+    ApiKey:
+      type: object
+      required: [id, name, environment, scopes, createdAt, updatedAt]
+      properties:
+        id: { type: string, example: key_123 }
+        name: { type: string, example: Checkout server }
+        environment: { $ref: '#/components/schemas/ApiKeyEnvironment' }
+        scopes:
+          type: array
+          items: { $ref: '#/components/schemas/ApiKeyScope' }
+        allowedIps:
+          type: [array, "null"]
+          items: { type: string }
+        key:
+          type: [string, "null"]
+          description: Plaintext key. Only present in `create` and `rotate` responses.
+        lastUsedAt: { type: [string, "null"], format: date-time }
+        revokedAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreateApiKeyParams:
+      type: object
+      required: [name, environment]
+      properties:
+        name: { type: string }
+        environment: { $ref: '#/components/schemas/ApiKeyEnvironment' }
+        scopes:
+          type: array
+          items: { $ref: '#/components/schemas/ApiKeyScope' }
+        allowedIps:
+          type: array
+          items: { type: string }
+
+    UpdateApiKeyParams:
+      type: object
+      properties:
+        name: { type: string }
+        scopes:
+          type: array
+          items: { $ref: '#/components/schemas/ApiKeyScope' }
+        allowedIps:
+          type: array
+          items: { type: string }
+
+    ApiKeyUsage:
+      type: object
+      required: [apiKeyId, totalRequests, period, data]
+      properties:
+        apiKeyId: { type: string }
+        totalRequests: { type: integer }
+        period:
+          type: object
+          required: [from, to]
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+        data:
+          type: array
+          items:
+            type: object
+            required: [timestamp, requests]
+            properties:
+              timestamp: { type: string, format: date-time }
+              requests: { type: integer }
+
+    # ── Stellar ──
+    StellarBalance:
+      type: object
+      required: [assetCode, balance]
+      properties:
+        assetCode: { type: string, example: USDC }
+        issuer: { type: [string, "null"], description: Omitted for the native asset. }
+        balance: { type: string, example: '100.0000000' }
+        limit: { type: [string, "null"] }
+
+    StellarAsset:
+      type: object
+      required: [assetCode, issuer]
+      properties:
+        assetCode: { type: string, example: USDC }
+        issuer: { type: string }
+        name: { type: [string, "null"] }
+        decimals: { type: [integer, "null"] }
+
+    TrustlineParams:
+      type: object
+      required: [assetCode, issuer]
+      properties:
+        assetCode: { type: string, example: USDC }
+        issuer: { type: string }
+
+    StellarTransaction:
+      type: object
+      required: [id, status]
+      properties:
+        id: { type: string }
+        hash: { type: [string, "null"], description: On-chain transaction hash. }
+        status: { type: string, example: pending }
+        multisigRequired: { type: [boolean, "null"] }
+        multisigSignatures: { type: [integer, "null"] }
+        multisigThreshold: { type: [integer, "null"] }
+        createdAt: { type: [string, "null"], format: date-time }
+
+    SignTransactionParams:
+      type: object
+      required: [signature]
+      properties:
+        signature: { type: string }
+        publicKey: { type: [string, "null"] }
+
+    StellarMode:
+      type: object
+      required: [mode]
+      properties:
+        mode: { type: string, example: testnet }
+
+    FundTestnetParams:
+      type: object
+      required: [address]
+      properties:
+        address: { type: string, description: Stellar address to fund. }
+
+    FundTestnetResponse:
+      type: object
+      required: [address]
+      properties:
+        address: { type: string }
+        hash: { type: [string, "null"], description: Funding transaction hash. }
+
+    # ── Outbound webhook event envelopes ──
+    TestEventData:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string, example: 'Webhook endpoint validated successfully' }
+
+    PaymentCreatedWebhook:
+      type: object
+      required: [id, type, timestamp, data]
+      properties:
+        id: { type: string, example: evt_01HABC123DEF456GHI789 }
+        type: { type: string, enum: ['payment.created'] }
+        timestamp: { type: string, format: date-time }
+        data: { $ref: '#/components/schemas/Payment' }
+
+    PaymentCompletedWebhook:
+      type: object
+      required: [id, type, timestamp, data]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: ['payment.completed'] }
+        timestamp: { type: string, format: date-time }
+        data: { $ref: '#/components/schemas/Payment' }
+
+    PaymentFailedWebhook:
+      type: object
+      required: [id, type, timestamp, data]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: ['payment.failed'] }
+        timestamp: { type: string, format: date-time }
+        data: { $ref: '#/components/schemas/Payment' }
+
+    PaymentExpiredWebhook:
+      type: object
+      required: [id, type, timestamp, data]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: ['payment.expired'] }
+        timestamp: { type: string, format: date-time }
+        data: { $ref: '#/components/schemas/Payment' }
+
+    PaymentSplitProcessedWebhook:
+      type: object
+      required: [id, type, timestamp, data]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: ['payment.split_processed'] }
+        timestamp: { type: string, format: date-time }
+        data: { $ref: '#/components/schemas/Payment' }
+
+    RefundIssuedWebhook:
+      type: object
+      required: [id, type, timestamp, data]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: ['refund.issued'] }
+        timestamp: { type: string, format: date-time }
+        data: { $ref: '#/components/schemas/Refund' }
+
+    DisputeOpenedWebhook:
+      type: object
+      required: [id, type, timestamp, data]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: ['dispute.opened'] }
+        timestamp: { type: string, format: date-time }
+        data: { $ref: '#/components/schemas/Dispute' }
+
+    TransactionMultisigRequiredWebhook:
+      type: object
+      required: [id, type, timestamp, data]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: ['transaction.multisig_required'] }
+        timestamp: { type: string, format: date-time }
+        data: { $ref: '#/components/schemas/StellarTransaction' }
+
+    TransactionMultisigCompletedWebhook:
+      type: object
+      required: [id, type, timestamp, data]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: ['transaction.multisig_completed'] }
+        timestamp: { type: string, format: date-time }
+        data: { $ref: '#/components/schemas/StellarTransaction' }
+
+    TestWebhook:
+      type: object
+      required: [id, type, timestamp, data]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: ['test'] }
+        timestamp: { type: string, format: date-time }
+        data: { $ref: '#/components/schemas/TestEventData' }

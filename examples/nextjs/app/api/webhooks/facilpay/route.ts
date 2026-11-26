@@ -1,28 +1,23 @@
-import { Webhooks, type FacilPayEvent } from '@facilpay/sdk';
+import { createWebhookHandler } from '@facilpay/sdk';
 
 export const runtime = 'nodejs';
 
-export async function POST(req: Request): Promise<Response> {
-  const secret = process.env.FACILPAY_WEBHOOK_SECRET;
-  if (!secret) {
-    return Response.json({ error: 'Webhook secret is not configured.' }, { status: 500 });
-  }
-
-  const signature = req.headers.get('x-facilpay-signature');
-  if (!signature) {
-    return Response.json({ error: 'Missing webhook signature.' }, { status: 400 });
-  }
-
-  const rawBody = await req.text();
-  let event: FacilPayEvent;
-  try {
-    event = await Webhooks.constructEvent<FacilPayEvent>(rawBody, signature, secret);
-  } catch {
-    return Response.json({ error: 'Invalid webhook signature.' }, { status: 401 });
-  }
-
-  if (event.type === 'payment.completed') {
-    console.log('Payment completed:', event.data.id);
-  }
-  return Response.json({ received: true });
-}
+/**
+ * POST /api/webhooks/facilpay
+ *
+ * FacilPay delivers signed webhook events here. createWebhookHandler reads
+ * the raw body, verifies the HMAC signature, and dispatches to the matching
+ * handler — returning 400 on a bad signature and 500 if a handler throws.
+ */
+export const POST = createWebhookHandler({
+  secret: process.env.FACILPAY_WEBHOOK_SECRET!,
+  on: {
+    'payment.completed': async (event) => {
+      // event.data is typed as Payment — no cast needed.
+      console.log('Payment completed:', event.data.id, event.data.amount, event.data.currency);
+    },
+    'refund.issued': async (event) => {
+      console.log('Refund issued:', event.data.id, 'for payment', event.data.paymentId);
+    },
+  },
+});

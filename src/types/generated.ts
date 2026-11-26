@@ -31,6 +31,24 @@ interface PaginatedResponseSchema {
   [key: string]: any;
 }
 
+/**
+ * Delivery statuses for a webhook delivery attempt.
+ */
+export type WebhookDeliveryStatus =
+  | 'pending'
+  | 'succeeded'
+  | 'failed'
+  | 'retrying'
+  | 'exhausted';
+
+interface WebhookDeliverySchema {
+  id: string;
+  endpointId: string;
+  eventType: string;
+  status: WebhookDeliveryStatus;
+  [key: string]: any;
+}
+
 export interface components {
   schemas: {
     Payment: PaymentSchema;
@@ -43,6 +61,7 @@ export interface components {
     Dispute: DisputeSchema;
     WebhookEndpoint: { id: string; [key: string]: any };
     CreateWebhookEndpointDto: Record<string, any>;
+    WebhookDelivery: WebhookDeliverySchema;
     Settlement: { id: string; [key: string]: any };
     Customer: { id: string; [key: string]: any };
     CreateCustomerDto: Record<string, any>;

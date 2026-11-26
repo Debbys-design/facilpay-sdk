@@ -40,8 +40,24 @@ jobs:
       - name: Run tests with coverage
         run: npm run test:coverage
 
+      - name: Run type-level tests
+        run: npx vitest --typecheck --run
+
       - name: Build SDK package
         run: npm run build
+
+      - name: Package export smoke tests
+        run: |
+          set -euo pipefail
+          SMOKE_DIR="$(mktemp -d)"
+          TARBALL="$(npm pack --silent --pack-destination "$SMOKE_DIR")"
+          cd "$SMOKE_DIR"
+          npm init -y >/dev/null
+          npm install --no-save --silent "./$TARBALL"
+          cp "$GITHUB_WORKSPACE/test/smoke/esm.mjs" ./esm.mjs
+          cp "$GITHUB_WORKSPACE/test/smoke/cjs.cjs" ./cjs.cjs
+          node ./esm.mjs
+          node ./cjs.cjs
 
       - name: Typecheck examples
         run: npm run typecheck:examples
@@ -51,3 +67,57 @@ jobs:
 
       - name: Check type resolutions (attw)
         run: npm run attw
+
+  edge-runtime:
+    name: Edge runtime (Workers via @edge-runtime/vm)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run core HTTP and webhook-verify tests on edge runtime
+        run: npm run test:edge
+
+  bun-smoke:
+    name: Bun smoke (allowed to fail)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run smoke tests
+        run: bun run test:smoke:bun
+
+  deno-smoke:
+    name: Deno smoke (allowed to fail)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Run smoke tests
+        run: deno run --allow-net --allow-read --allow-env test/smoke/deno.ts
