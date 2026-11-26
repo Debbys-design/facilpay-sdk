@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHmac } from 'node:crypto';
 import { WebhooksResource } from './webhooks';
 import type { HttpClient } from '../core/http';
 
@@ -6,6 +7,20 @@ function createMockHttp() {
   return {
     request: vi.fn(async () => ({ data: {}, status: 200, headers: new Headers() })),
   } as unknown as HttpClient & { request: ReturnType<typeof vi.fn> };
+}
+
+async function subtleHmacHex(secret: string, payload: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+  return Array.from(new Uint8Array(signature))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 describe('WebhooksResource', () => {
@@ -140,5 +155,15 @@ describe('WebhooksResource', () => {
     expect(http.request).toHaveBeenCalledWith(
       expect.objectContaining({ signal: controller.signal }),
     );
+  });
+
+  it('crypto.subtle HMAC-SHA256 matches node:crypto for webhook verification', async () => {
+    const secret = 'whsec_test_secret';
+    const payload = JSON.stringify({ id: 'evt_123', type: 'payment.succeeded' });
+
+    const nodeSignature = createHmac('sha256', secret).update(payload).digest('hex');
+    const subtleSignature = await subtleHmacHex(secret, payload);
+
+    expect(subtleSignature).toBe(nodeSignature);
   });
 });

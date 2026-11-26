@@ -18,9 +18,13 @@ export class FacilPayError extends Error {
  * is made (e.g. malformed idempotency keys or invalid resource arguments).
  */
 export class FacilPayValidationError extends FacilPayError {
+  /** Machine-readable failure code, when available. */
+  public readonly code?: string;
+
   constructor(message: string, options?: { code?: string }) {
     super(message, options);
     this.name = 'FacilPayValidationError';
+    this.code = options?.code;
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
